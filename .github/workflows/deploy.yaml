@@ -1,0 +1,160 @@
+name: Deploy CorpX Knowledge Base
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - .gitignore
+      - README.md
+      - CONTRIBUTING.md
+      - LICENSE
+      - LICENSE.txt
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpx-knowledge-base-deployment
+  cancel-in-progress: true
+
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    env:
+      URL_CHECKER_TIMEOUT: ${{ vars.URL_CHECKER_TIMEOUT }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '18'
+
+      - name: Restore node_modules cache
+        id: node-modules-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-18-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Run all linters
+        run: npm run lint:all
+
+      - name: Run URL checker
+        run: node script/url-checker.js -t "$URL_CHECKER_TIMEOUT"
+
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '18'
+
+      - name: Restore node_modules cache
+        id: node-modules-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-18-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        run: npm ci
+      
+      - name: Build production site
+        env:
+          PATH_PREFIX: /${{ github.event.repository.name }}/
+        run: npm run prod
+
+      - name: Upload built site
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: built-site
+          path: _site
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy
+    needs:
+      - test
+      - build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      issues: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download built site
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: built-site
+          path: _site
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+      - name: Create deployment status issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_OUTCOME: ${{ steps.deployment.outcome }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          if [ "$DEPLOYMENT_OUTCOME" = "success" ]; then
+            status="succeeded"
+          else
+            status="failed"
+          fi
+
+          deployment_date="$(date -u +'%Y-%m-%d')"
+          knowledge_base_url="${PAGE_URL:-$(printf '%s://%s.github.io/%s/' 'https' "$GITHUB_REPOSITORY_OWNER" "${GITHUB_REPOSITORY#*/}")}"
+
+          gh issue create \
+            --title "${deployment_date} - Deployment: ${status}" \
+            --body "Knowledge base: ${knowledge_base_url}"
+
+      - name: Fail job if deployment failed
+        if: steps.deployment.outcome != 'success'
+        run: exit 1
