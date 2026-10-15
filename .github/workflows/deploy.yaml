@@ -139,7 +139,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{github.repository}}
+          GH_REPO: ${{ github.repository }}
           DEPLOYMENT_OUTCOME: ${{ steps.deployment.outcome }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
